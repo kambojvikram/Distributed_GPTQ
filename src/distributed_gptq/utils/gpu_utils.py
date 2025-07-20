@@ -82,6 +82,42 @@ class GPUMemoryManager:
         logger.debug(f"Memory snapshot '{label}': {current_allocated:.2f}GB allocated")
 
 
+def get_gpu_memory_info(device: Optional[Union[str, torch.device]] = None) -> Dict[str, float]:
+    """Return GPU memory statistics for the given device."""
+    if device is None:
+        device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+
+    if not torch.cuda.is_available() or (isinstance(device, str) and device == "cpu"):
+        return {"allocated": 0.0, "reserved": 0.0, "free": 0.0, "total": 0.0}
+
+    dev = torch.device(device)
+    allocated = torch.cuda.memory_allocated(dev) / 1024 ** 3
+    reserved = torch.cuda.memory_reserved(dev) / 1024 ** 3
+    total = torch.cuda.get_device_properties(dev).total_memory / 1024 ** 3
+    free = total - reserved
+
+    return {"allocated": allocated, "reserved": reserved, "free": free, "total": total}
+
+
+def clear_gpu_cache(device: Optional[Union[str, torch.device]] = None) -> None:
+    """Clear the CUDA memory cache."""
+    if not torch.cuda.is_available():
+        return
+    if device is not None:
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+    else:
+        torch.cuda.empty_cache()
+
+
+def get_device_capability(device: Optional[Union[int, torch.device]] = None) -> Tuple[int, int]:
+    """Return compute capability of the given CUDA device."""
+    if not torch.cuda.is_available():
+        return (0, 0)
+    dev = device if device is not None else torch.cuda.current_device()
+    dev = dev.index if isinstance(dev, torch.device) else dev
+    return torch.cuda.get_device_capability(dev)
+
 def get_free_gpu_memory():
     """Get free GPU memory."""
     import torch

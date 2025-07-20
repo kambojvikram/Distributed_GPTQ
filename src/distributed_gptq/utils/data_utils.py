@@ -181,6 +181,30 @@ class DataCollator:
         return batch_dict
 
 
+def prepare_calibration_data(
+    data: Union[List, str, Path],
+    tokenizer: Optional[Callable] = None,
+    max_length: int = 512,
+    num_samples: Optional[int] = None,
+    shuffle: bool = False,
+    preprocessing_fn: Optional[Callable] = None,
+    batch_size: int = 1,
+    **dataloader_kwargs,
+) -> data.DataLoader:
+    """Create a simple calibration dataloader from raw data."""
+
+    return create_calibration_dataloader(
+        data_source=data,
+        tokenizer=tokenizer,
+        batch_size=batch_size,
+        max_length=max_length,
+        num_samples=num_samples,
+        shuffle=shuffle,
+        preprocessing_fn=preprocessing_fn,
+        **dataloader_kwargs,
+    )
+
+
 def create_calibration_dataloader(
     data_source: Union[List, str, Path],
     tokenizer: Optional[Callable] = None,
@@ -234,6 +258,30 @@ def create_calibration_dataloader(
         shuffle=shuffle and num_samples is None,
         collate_fn=collator,
         **dataloader_kwargs
+    )
+
+
+def create_dataloader(
+    data: Union[List, str, Path],
+    tokenizer: Optional[Callable] = None,
+    batch_size: int = 1,
+    max_length: int = 512,
+    num_samples: Optional[int] = None,
+    shuffle: bool = False,
+    preprocessing_fn: Optional[Callable] = None,
+    **dataloader_kwargs,
+) -> data.DataLoader:
+    """Alias for :func:`create_calibration_dataloader` for backward compatibility."""
+
+    return create_calibration_dataloader(
+        data_source=data,
+        tokenizer=tokenizer,
+        batch_size=batch_size,
+        max_length=max_length,
+        num_samples=num_samples,
+        shuffle=shuffle,
+        preprocessing_fn=preprocessing_fn,
+        **dataloader_kwargs,
     )
 
 
