@@ -9,90 +9,41 @@ import json
 from pathlib import Path
 import torch
 from typing import Optional
+import os
+import torch.multiprocessing as mp
+import torch.distributed as dist
+
+from .utils.logging_utils import setup_logging, get_logger
+from .utils.gpu_utils import check_gpu_availability, print_gpu_info
+from .utils.data_utils import load_common_datasets, create_calibration_dataloader
+from .core.quantizer import QuantizationConfig
+from .core.gptq import GPTQQuantizer
+from .models.transformers_model import load_transformers_model
+from .distributed.coordinator import DistributedCoordinator
+from .utils.benchmark import PerformanceMonitor
+from .utils.conversion import convert_model_format
+from safetensors import save_file
+
 
 from . import (
-    DistributedGPTQuantizer,
-    QuantizationConfig,
-    create_distributed_config,
     __version__
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Remove the basicConfig and get a logger instance
+logger = get_logger(__name__)
 
 
 def quantize_command(args):
     """Handle quantize command."""
-    # Setup configs
-    quant_config = QuantizationConfig(
-        bits=args.bits,
-        group_size=args.group_size,
-        actorder=args.actorder,
-        percdamp=args.percdamp,
-        blocksize=args.blocksize,
-        calibration_samples=args.calibration_samples,
-    )
-    
-    dist_config = create_distributed_config(mode=args.mode)
-    
-    # Load model based on framework
-    if args.framework == "transformers":
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        
-        logger.info(f"Loading model: {args.model}")
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model,
-            torch_dtype=torch.float16 if args.fp16 else torch.float32,
-            device_map="auto" if dist_config.mode.value == "single_gpu" else None
+    if args.distributed:
+        mp.spawn(
+            distributed_quantize,
+            args=(args,),
+            nprocs=args.world_size,
+            join=True
         )
-        
-        # Load calibration data
-        if args.calibration_dataset:
-            logger.info(f"Loading calibration data from {args.calibration_dataset}")
-            from .utils.data_utils import load_calibration_dataset
-            
-            tokenizer = AutoTokenizer.from_pretrained(args.model)
-            calibration_data = load_calibration_dataset(
-                args.calibration_dataset,
-                tokenizer,
-                n_samples=args.calibration_samples,
-                seq_len=args.seq_len
-            )
-        else:
-            raise ValueError("Calibration dataset required for quantization")
     else:
-        raise ValueError(f"Framework {args.framework} not supported yet")
-    
-    # Create quantizer
-    quantizer = DistributedGPTQuantizer(
-        quantization_config=quant_config,
-        distributed_config=dist_config
-    )
-    
-    # Quantize
-    logger.info("Starting quantization...")
-    quantized_model = quantizer.quantize_model(
-        model,
-        calibration_data,
-        save_path=args.output
-    )
-    
-    logger.info(f"Quantization complete! Model saved to {args.output}")
-    
-    # Save config
-    if args.save_config:
-        config_path = Path(args.output).parent / "quantization_config.json"
-        config_data = {
-            "quantization_config": quant_config.__dict__,
-            "model_name": args.model,
-            "framework": args.framework,
-        }
-        with open(config_path, 'w') as f:
-            json.dump(config_data, f, indent=2)
-        logger.info(f"Config saved to {config_path}")
+        single_gpu_quantize(args)
 
 
 def benchmark_command(args):
@@ -133,8 +84,6 @@ def convert_command(args):
     """Handle convert command."""
     logger.info(f"Converting {args.input} to {args.output_format}")
     
-    from .utils.conversion import convert_model_format
-    
     convert_model_format(
         input_path=args.input,
         output_path=args.output,
@@ -148,6 +97,37 @@ def convert_command(args):
 
 def main():
     """Main CLI entry point."""
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    if not hasattr(args, 'func'):
+        parser.print_help()
+        sys.exit(1)
+
+    # Setup logging
+    log_level = args.log_level if hasattr(args, 'log_level') else 'INFO'
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Execute command
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create command line argument parser."""
     parser = argparse.ArgumentParser(
         description="Distributed GPTQ Quantization Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -160,189 +140,27 @@ def main():
     )
     
     subparsers = parser.add_subparsers(dest="command", help="Commands")
-    
-    # Quantize command
-    quantize_parser = subparsers.add_parser(
-        "quantize",
-        help="Quantize a model"
-    )
-    quantize_parser.add_argument(
-        "model",
-        help="Model to quantize (HuggingFace model name or path)"
-    )
-    quantize_parser.add_argument(
-        "-o", "--output",
-        required=True,
-        help="Output path for quantized model"
-    )
-    quantize_parser.add_argument(
-        "-b", "--bits",
-        type=int,
-        default=4,
-        choices=[2, 3, 4, 8],
-        help="Quantization bits (default: 4)"
-    )
-    quantize_parser.add_argument(
-        "-g", "--group-size",
-        type=int,
-        default=128,
-        help="Group size for quantization (default: 128)"
-    )
-    quantize_parser.add_argument(
-        "--calibration-dataset",
-        default="wikitext",
-        help="Dataset for calibration (default: wikitext)"
-    )
-    quantize_parser.add_argument(
-        "--calibration-samples",
-        type=int,
-        default=128,
-        help="Number of calibration samples (default: 128)"
-    )
-    quantize_parser.add_argument(
-        "--seq-len",
-        type=int,
-        default=2048,
-        help="Sequence length for calibration (default: 2048)"
-    )
-    quantize_parser.add_argument(
-        "--actorder",
-        action="store_true",
-        help="Use activation order"
-    )
-    quantize_parser.add_argument(
-        "--percdamp",
-        type=float,
-        default=0.01,
-        help="Percentage dampening (default: 0.01)"
-    )
-    quantize_parser.add_argument(
-        "--blocksize",
-        type=int,
-        default=128,
-        help="Block size for quantization (default: 128)"
-    )
-    quantize_parser.add_argument(
-        "--mode",
-        choices=["single_gpu", "data_parallel", "model_parallel", "auto"],
-        default="auto",
-        help="Quantization mode (default: auto)"
-    )
-    quantize_parser.add_argument(
-        "--framework",
-        choices=["transformers", "pytorch"],
-        default="transformers",
-        help="Model framework (default: transformers)"
-    )
-    quantize_parser.add_argument(
-        "--fp16",
-        action="store_true",
-        help="Use FP16 precision"
-    )
-    quantize_parser.add_argument(
-        "--save-config",
-        action="store_true",
-        help="Save quantization config"
-    )
+
+    # Quantize command parser
+    quantize_parser = subparsers.add_parser("quantize", help="Quantize a model")
+    add_quantize_arguments(quantize_parser)
     quantize_parser.set_defaults(func=quantize_command)
-    
-    # Benchmark command
-    bench_parser = subparsers.add_parser(
-        "benchmark",
-        help="Benchmark quantized model"
-    )
-    bench_parser.add_argument(
-        "model",
-        help="Original model path"
-    )
-    bench_parser.add_argument(
-        "quantized_model",
-        help="Quantized model path"
-    )
-    bench_parser.add_argument(
-        "--test-samples",
-        type=int,
-        default=100,
-        help="Number of test samples (default: 100)"
-    )
-    bench_parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="Batch size for testing (default: 1)"
-    )
-    bench_parser.add_argument(
-        "--device",
-        default="cuda",
-        help="Device to run benchmark on (default: cuda)"
-    )
-    bench_parser.add_argument(
-        "--save-results",
-        help="Path to save benchmark results"
-    )
+
+    # Benchmark command parser
+    bench_parser = subparsers.add_parser("benchmark", help="Benchmark a quantized model")
+    add_benchmark_arguments(bench_parser)
     bench_parser.set_defaults(func=benchmark_command)
-    
-    # Convert command
-    convert_parser = subparsers.add_parser(
-        "convert",
-        help="Convert model between formats"
-    )
-    convert_parser.add_argument(
-        "input",
-        help="Input model path"
-    )
-    convert_parser.add_argument(
-        "output",
-        help="Output model path"
-    )
-    convert_parser.add_argument(
-        "--input-format",
-        choices=["pytorch", "safetensors", "gguf"],
-        required=True,
-        help="Input format"
-    )
-    convert_parser.add_argument(
-        "--output-format",
-        choices=["pytorch", "safetensors", "gguf"],
-        required=True,
-        help="Output format"
-    )
-    convert_parser.add_argument(
-        "--optimize",
-        action="store_true",
-        help="Optimize during conversion"
-    )
+
+    # Convert command parser
+    convert_parser = subparsers.add_parser("convert", help="Convert model format")
+    add_convert_arguments(convert_parser)
     convert_parser.set_defaults(func=convert_command)
-    
-    # Parse arguments
-    args = parser.parse_args()
-    
-    if args.command is None:
-        parser.print_help()
-        sys.exit(1)
-    
-    # Execute command
-    try:
-        args.func(args)
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        sys.exit(1)
+
+    return parser
 
 
-if __name__ == "__main__":
-    main()
-
-
-def create_parser() -> argparse.ArgumentParser:
-    """Create command line argument parser."""
-    parser = argparse.ArgumentParser(
-        description="Distributed GPTQ Quantization Tool",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    
+def add_quantize_arguments(parser: argparse.ArgumentParser):
+    """Add arguments for the quantize command."""
     # Model arguments
     model_group = parser.add_argument_group('Model Configuration')
     model_group.add_argument(
@@ -521,8 +339,68 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Enable detailed profiling'
     )
-    
-    return parser
+
+
+def add_benchmark_arguments(parser: argparse.ArgumentParser):
+    """Add arguments for the benchmark command."""
+    parser.add_argument(
+        "model",
+        help="Original model path"
+    )
+    parser.add_argument(
+        "quantized_model",
+        help="Quantized model path"
+    )
+    parser.add_argument(
+        "--test-samples",
+        type=int,
+        default=100,
+        help="Number of test samples (default: 100)"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Batch size for testing (default: 1)"
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="Device to run benchmark on (default: cuda)"
+    )
+    parser.add_argument(
+        "--save-results",
+        help="Path to save benchmark results"
+    )
+
+
+def add_convert_arguments(parser: argparse.ArgumentParser):
+    """Add arguments for the convert command."""
+    parser.add_argument(
+        "input",
+        help="Input model path"
+    )
+    parser.add_argument(
+        "output",
+        help="Output model path"
+    )
+    parser.add_argument(
+        "--input-format",
+        choices=["pytorch", "safetensors", "gguf"],
+        required=True,
+        help="Input format"
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["pytorch", "safetensors", "gguf"],
+        required=True,
+        help="Output format"
+    )
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="Optimize during conversion"
+    )
 
 
 def load_model_and_tokenizer(args):
@@ -666,7 +544,6 @@ def single_gpu_quantize(args):
     
     if args.save_format in ['safetensors', 'both']:
         try:
-            from safetensors.torch import save_file
             save_file(quantized_model.state_dict(), model_output_dir / "model.safetensors")
         except ImportError:
             logger.warning("safetensors not available, using pytorch format")
@@ -771,7 +648,6 @@ def distributed_quantize(rank: int, args):
             
             if args.save_format in ['safetensors', 'both']:
                 try:
-                    from safetensors.torch import save_file
                     save_file(quantized_model.state_dict(), model_output_dir / "model.safetensors")
                 except ImportError:
                     logger.warning("safetensors not available, using pytorch format")
@@ -795,46 +671,8 @@ def distributed_quantize(rank: int, args):
         dist.destroy_process_group()
 
 
-def main():
-    """Main entry point."""
-    parser = create_parser()
-    args = parser.parse_args()
-    
-    # Validate arguments
-    if args.distributed and args.world_size <= 1:
-        print("Error: Distributed mode requires world_size > 1")
-        sys.exit(1)
-    
-    if args.dataset == 'custom' and not args.dataset_path:
-        print("Error: Custom dataset requires --dataset-path")
-        sys.exit(1)
-    
-    # Print configuration
-    print("Distributed GPTQ Quantization")
-    print("=" * 40)
-    print(f"Model: {args.model}")
-    print(f"Bits: {args.bits}")
-    print(f"Group size: {args.group_size}")
-    print(f"Dataset: {args.dataset}")
-    print(f"Samples: {args.num_samples}")
-    print(f"Distributed: {args.distributed}")
-    if args.distributed:
-        print(f"World size: {args.world_size}")
-    print("=" * 40)
-    
-    # Run quantization
-    if args.distributed:
-        # Launch distributed processes
-        mp.spawn(
-            distributed_quantize,
-            args=(args,),
-            nprocs=args.world_size,
-            join=True
-        )
-    else:
-        # Run on single GPU
-        single_gpu_quantize(args)
-
-
-if __name__ == "__main__":
-    main()
+def create_log_directory() -> Path:
+    """Create a directory for logging."""
+    log_dir = Path.cwd() / "logs"
+    log_dir.mkdir(exist_ok=True)
+    return log_dir

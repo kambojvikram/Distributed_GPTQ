@@ -12,8 +12,10 @@ from typing import Dict, Any, List, Optional, Tuple
 import queue
 import threading
 import time
-import logging
 from dataclasses import dataclass
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,6 +27,61 @@ class Message:
     message_type: str
     data: Any
     timestamp: float
+
+
+class DistributedCommunicator:
+    """
+    Handles high-level communication between the coordinator and workers
+    for task distribution and result gathering.
+    """
+    def __init__(self, rank: int, world_size: int):
+        self.rank = rank
+        self.world_size = world_size
+        if not dist.is_initialized():
+            raise RuntimeError("Distributed process group is not initialized.")
+
+    def broadcast_object(self, obj: Any, src: int = 0):
+        """
+        Broadcasts a Python object from a source rank to all other ranks.
+
+        Args:
+            obj: The object to broadcast. Can be any pickle-able Python object.
+            src: The rank of the process that is sending the object.
+        """
+        if self.rank == src:
+            objects = [obj]
+        else:
+            objects = [None]
+        
+        dist.broadcast_object_list(objects, src=src)
+        
+        if self.rank != src:
+            return objects[0]
+        return obj
+
+    def gather_objects(self, obj: Any, dst: int = 0) -> Optional[List[Any]]:
+        """
+        Gathers Python objects from all processes to a destination rank.
+
+        Args:
+            obj: The object to be sent from the current process.
+            dst: The rank of the process that will receive the objects.
+
+        Returns:
+            A list of objects gathered from all processes if the current process
+            is the destination, otherwise None.
+        """
+        # Ensure all processes participate in the gather call.
+        # The `gather_object` function requires a list on the destination rank
+        # to store the gathered objects.
+        if self.rank == dst:
+            gather_list = [None] * self.world_size
+        else:
+            gather_list = None
+            
+        dist.gather_object(obj, gather_list, dst=dst)
+        
+        return gather_list
 
 
 class CommunicationManager:

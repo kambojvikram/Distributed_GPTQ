@@ -138,7 +138,7 @@ class DistributedGPTQWorker:
         """
         try:
             # Use distributed communication to receive task
-            task_data = self.communicator.receive_from_coordinator()
+            task_data = self.communicator.broadcast_object(None, src=0)
             
             if task_data is None or task_data.get('type') == 'shutdown':
                 return None
@@ -310,7 +310,7 @@ class DistributedGPTQWorker:
                 'worker_id': self.worker_id
             }
             
-            self.communicator.send_to_coordinator(result_data)
+            self.communicator.gather_objects(result_data, dst=0)
             
             logger.info(f"Worker {self.worker_id} sent result for {result.layer_name}")
             

@@ -4,25 +4,21 @@ Main interface for distributed GPTQ quantization.
 
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, List, Union, Callable
-from pathlib import Path
-import logging
-from tqdm import tqdm
 import json
 import time
 from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List, Dict, Union, Optional, Callable
 
-from .gptq import GPTQ
-from ..distributed.coordinator import (
-    DistributedGPTQCoordinator,
-    DistributedConfig,
-    QuantizationMode,
-    create_distributed_config
-)
-from ..utils.data_utils import prepare_calibration_data
-from ..utils.gpu_utils import get_gpu_memory_info, clear_gpu_cache
+from tqdm import tqdm
+from safetensors import safe_open, save_file, load_file
 
-logger = logging.getLogger(__name__)
+from .gptq import GPTQQuantizer
+from ..utils.logging_utils import get_logger
+from ..distributed import DistributedConfig, create_distributed_config, DistributedGPTQCoordinator
+from ..utils import clear_gpu_cache
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -182,120 +178,6 @@ class DistributedGPTQuantizer:
                         
         return layers
         
-    def _get_default_config(self) -> Dict[str, Any]:
-        """Get default quantization configuration."""
-        return {
-            'bits': 4,
-            'group_size': 128,
-            'actorder': False,
-            'percdamp': 0.01,
-            'blocksize': 128,
-            'batch_size': 1,
-            'max_samples': 1000,
-            'skip_layers': [],
-            'save_quantized': True,
-            'save_path': './quantized_model',
-            'log_level': 'INFO',
-        }
-    
-    def quantize(
-        self,
-        calibration_data: torch.utils.data.DataLoader,
-        save_path: Optional[str] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Quantize the model using GPTQ algorithm.
-        
-        Args:
-            calibration_data: Calibration dataset
-            save_path: Path to save quantized model
-            **kwargs: Additional quantization parameters
-            
-        Returns:
-            Quantization statistics
-        """
-        self.logger.info("Starting model quantization")
-        start_time = time.time()
-        
-        # Update config with kwargs
-        config = {**self.config, **kwargs}
-        
-        # Get layers to quantize
-        if isinstance(self.model, QuantizableModel):
-            layers = self.model.get_layers()
-        else:
-            layers = self._get_quantizable_layers()
-        
-        # Filter out skip layers
-        skip_patterns = config.get('skip_layers', [])
-        filtered_layers = {}
-        for name, layer in layers.items():
-            if not any(pattern in name for pattern in skip_patterns):
-                filtered_layers[name] = layer
-        
-        self.logger.info(f"Quantizing {len(filtered_layers)} layers")
-        
-        # Setup multi-GPU quantization
-        if len(self.devices) > 1:
-            quantizer = GPTQMultiGPU(
-                model=self.model,
-                bits=config['bits'],
-                group_size=config['group_size'],
-                actorder=config['actorder'],
-                percdamp=config['percdamp'],
-                blocksize=config['blocksize'],
-                devices=self.devices
-            )
-            
-            # Prepare layers
-            for layer_name, layer in filtered_layers.items():
-                quantizer.prepare_layer(layer_name, layer)
-            
-            # Collect calibration data
-            self._collect_calibration_data_multigpu(quantizer, calibration_data, config)
-            
-            # Quantize all layers
-            layer_stats = quantizer.quantize_all_layers()
-            
-        else:
-            # Single GPU quantization
-            layer_stats = self._quantize_single_gpu(filtered_layers, calibration_data, config)
-        
-        # Calculate overall statistics
-        total_error = sum(stats.get('total_error', 0) for stats in layer_stats.values())
-        total_layers = len(layer_stats)
-        avg_compression = sum(stats.get('compression_ratio', 1) for stats in layer_stats.values()) / total_layers
-        
-        self.quantization_stats = {
-            'total_layers': total_layers,
-            'total_error': total_error,
-            'average_compression_ratio': avg_compression,
-            'quantization_time': time.time() - start_time,
-            'layer_stats': layer_stats,
-            'config': config,
-        }
-        
-        self.is_quantized = True
-        
-        # Save quantized model if requested
-        if config.get('save_quantized', True):
-            save_path = save_path or config.get('save_path', './quantized_model')
-            self.save_quantized_model(save_path)
-        
-        self.logger.info(f"Quantization complete in {self.quantization_stats['quantization_time']:.2f}s")
-        self.logger.info(f"Average compression ratio: {avg_compression:.2f}x")
-        
-        return self.quantization_stats
-    
-    def _get_quantizable_layers(self) -> Dict[str, nn.Module]:
-        """Get quantizable layers from the model."""
-        layers = {}
-        for name, module in self.model.named_modules():
-            if isinstance(module, (nn.Linear, nn.Conv2d)):
-                layers[name] = module
-        return layers
-
     def _create_calibration_loader(
         self,
         calibration_data: List[torch.Tensor]
@@ -388,8 +270,6 @@ class DistributedGPTQuantizer:
         }
         
         if save_format == "safetensors":
-            from safetensors.torch import save_file
-            
             # Convert model state dict for safetensors
             state_dict = model.state_dict()
             
@@ -430,8 +310,6 @@ class DistributedGPTQuantizer:
         load_path = Path(load_path)
         
         if load_format == "safetensors":
-            from safetensors.torch import load_file
-            
             # Load metadata
             metadata_path = load_path.with_suffix('.json')
             with open(metadata_path, 'r') as f:
