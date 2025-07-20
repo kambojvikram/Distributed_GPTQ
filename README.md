@@ -235,3 +235,12 @@ This implementation is based on the original GPTQ paper:
 - [PyPI Package](https://pypi.org/project/distributed-gptq)
 - [GitHub Repository](https://github.com/yourusername/distributed-gptq)
 - [Issue Tracker](https://github.com/yourusername/distributed-gptq/issues)
+
+## ⚠️ Troubleshooting & Hardware Requirements
+
+- **CUDA Out of Memory**: Reduce batch size, group size, or use more GPUs. 72B models typically require 8+ GPUs with 40GB+ VRAM each.
+- **Distributed Timeout**: Ensure all nodes have network connectivity and matching CUDA/NCCL versions.
+- **Model Loading**: For very large models, ensure sufficient CPU RAM and disk space.
+- **CLI Version**: Check your install with `distributed-gptq --version` or get help with `distributed-gptq --help`.
+
+For more, see the [examples/README.md](examples/README.md) and [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md).

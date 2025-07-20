@@ -40,6 +40,7 @@ setup(
         'numpy>=1.19.0',
         'tqdm>=4.62.0',
         'transformers>=4.30.0',
+        'datasets>=2.0.0',  # Added for calibration and data loading
         'accelerate>=0.20.0',
         'safetensors>=0.3.1',
         'scipy>=1.7.0',
