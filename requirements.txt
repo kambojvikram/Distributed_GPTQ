@@ -1,0 +1,24 @@
+# Core dependencies
+torch>=2.0.0
+numpy>=1.19.0
+tqdm>=4.62.0
+transformers>=4.30.0
+accelerate>=0.20.0
+safetensors>=0.3.1
+scipy>=1.7.0
+
+# Optional dependencies for enhanced functionality
+triton>=2.0.0; sys_platform != "win32"  # CUDA kernels (Linux/Mac only)
+
+# Development dependencies (install with: pip install -e ".[dev]")
+# pytest>=7.0.0
+# pytest-cov>=3.0.0
+# black>=22.0.0
+# isort>=5.10.0
+# flake8>=4.0.0
+# mypy>=0.950
+
+# Documentation dependencies (install with: pip install -e ".[docs]")
+# sphinx>=4.5.0
+# sphinx-rtd-theme>=1.0.0
+# sphinx-autodoc-typehints>=1.18.0
